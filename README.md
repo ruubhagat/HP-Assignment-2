@@ -82,7 +82,6 @@ printf( "Processor %d msg from: %d, type: %d, address: 0x%02X\n",
 ```
 
 The final output should only contain the dump from `printProcessorState`.
->>>>>>> e9482c6 (Initial commit)
 
 ## How to Run
 
