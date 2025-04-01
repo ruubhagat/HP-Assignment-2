@@ -1,6 +1,7 @@
-# Name : Rutuja Bhagat   SRN : PES1UG23CS808
-# HP-Assignment-2 Directory-Based Cache Coherence Protocol Simulation
-=======
+# Name : Rutuja Bhagat   
+# SRN : PES1UG23CS808
+## HP-Assignment-2 Directory-Based Cache Coherence Protocol Simulation
+
 
 In this assignment, you will be implementing a directory-based cache coherence protocol in a distributed shared memory ( DSM ) system. The protocol which you will be implementing is based off of [DASH](https://dl.acm.org/doi/10.1145/325096.325132), but is not 1:1 replica. The implementation details will be explained in the subsequent sections. The system consists of multiple processor nodes, which will be simulated using OpenMP. Each processor contains:
 - Local cache   : direct-mapped, with `CACHE_SIZE` entries
