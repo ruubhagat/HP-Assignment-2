@@ -3,8 +3,8 @@
 #include <omp.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h> // For usleep
-#include <ctype.h>  // For isspace
+#include <unistd.h>
+#include <ctype.h>
 
 #define NUM_PROCS 4
 #define CACHE_SIZE 4
@@ -14,9 +14,7 @@
 
 typedef unsigned char byte;
 
-// Cache line states MUST match this order for print formatting later
 typedef enum { MODIFIED, EXCLUSIVE, SHARED, INVALID } cacheLineState;
-// Directory states MUST match this order for print formatting later
 typedef enum { EM, S, U } directoryEntryState;
 
 typedef enum {
@@ -57,9 +55,9 @@ typedef struct message {
     int sender;
     byte address;
     byte value;
-    byte bitVector;      // Also used in REPLY_RD to signal Exclusive (2) vs Shared (0)
+    byte bitVector;
     int secondReceiver;
-    directoryEntryState dirState;
+
 } message;
 
 typedef struct messageBuffer {
@@ -75,24 +73,24 @@ typedef struct processorNode {
     directoryEntry directory[ MEM_SIZE ];
     instruction instructions[ MAX_INSTR_NUM ];
     int instructionCount;
+
     byte pendingWriteValue;
     byte waitingForReply;
-    int outstandingMsgs; // Not strictly used currently, but available
+    int outstandingMsgs;
 
 } processorNode;
 
-// Function Prototypes
+
 void initializeProcessor( int threadId, processorNode *node, char *dirName );
 void sendMessage( int receiver, message msg );
 void handleCacheReplacement( int sender, cacheLine oldCacheLine );
 void printProcessorState( int processorId, processorNode node );
 
 
-// Global Shared Variables
 messageBuffer messageBuffers[ NUM_PROCS ];
 omp_lock_t msgBufferLocks[ NUM_PROCS ];
 
-// Helper Functions
+
 int isBitSet(byte bitVector, int procId) {
     return (bitVector >> procId) & 1;
 }
@@ -103,7 +101,7 @@ int findOwner(byte bitVector) {
             return i;
         }
     }
-    return -1; // Indicates no single bit set (error in EM state)
+    return -1;
 }
 
 int countSharers(byte bitVector) {
@@ -117,7 +115,6 @@ int countSharers(byte bitVector) {
 }
 
 
-// Main Function
 int main( int argc, char * argv[] ) {
     if (argc < 2) {
         fprintf( stderr, "Usage: %s <test_directory>\n", argv[0] );
@@ -127,7 +124,7 @@ int main( int argc, char * argv[] ) {
 
     omp_set_num_threads( NUM_PROCS );
 
-    // Initialize locks before parallel region
+
     for ( int i = 0; i < NUM_PROCS; i++ ) {
         messageBuffers[ i ].count = 0;
         messageBuffers[ i ].head = 0;
@@ -135,57 +132,60 @@ int main( int argc, char * argv[] ) {
         omp_init_lock(&msgBufferLocks[ i ]);
     }
 
-    #pragma omp parallel // Start parallel execution
+    #pragma omp parallel
     {
         int threadId = omp_get_thread_num();
-        processorNode node; // Node is private to each thread
+        processorNode node;
         message msg;
         message msgReply;
         instruction instr;
         int instructionIdx = -1;
-        int instructions_done = 0; // Flag for when instructions are finished
-        node.waitingForReply = 0;  // Initialize private state
+        int instructions_done = 0;
+        node.waitingForReply = 0;
+        node.pendingWriteValue = 0;
         node.outstandingMsgs = 0;
 
-        // Initialize this processor node
+
         initializeProcessor( threadId, &node, dirName );
 
-        #pragma omp barrier // Wait for all threads to initialize
+        #pragma omp barrier
 
-        // Main Simulation Loop
         while ( 1 ) {
             int processed_message_this_cycle = 0;
 
-            // --- Step 1: Process Incoming Messages ---
-            omp_set_lock(&msgBufferLocks[threadId]); // Lock own buffer to read
+
+            omp_set_lock(&msgBufferLocks[threadId]);
             while ( messageBuffers[ threadId ].count > 0 ) {
                 processed_message_this_cycle = 1;
 
                 int head = messageBuffers[ threadId ].head;
-                msg = messageBuffers[ threadId ].queue[ head ]; // Copy message
-                messageBuffers[ threadId ].head = ( head + 1 ) % MSG_BUFFER_SIZE;
-                messageBuffers[ threadId ].count--;
+                msg = messageBuffers[ threadId ].queue[ head ];
 
-                omp_unset_lock(&msgBufferLocks[threadId]); // Release lock before processing
+                messageBuffers[ threadId ].count--;
+                messageBuffers[ threadId ].head = ( head + 1 ) % MSG_BUFFER_SIZE;
+
+
+                omp_unset_lock(&msgBufferLocks[threadId]);
 
                 #ifdef DEBUG_MSG
-                printf( "Processor %d msg from: %d, type: %d, address: 0x%02X, val: %d, vec: 0x%02X, rcv2: %d\n",
-                        threadId, msg.sender, msg.type, msg.address, msg.value, msg.bitVector, msg.secondReceiver);
+
+                printf( "Processor %d msg from: %d, type: %d, address: 0x%02X\n",
+                        threadId, msg.sender, msg.type, msg.address);
                 #endif
 
-                // Common variables for message handling
-                byte procNodeAddr = msg.address >> 4; // Home node ID
-                byte memBlockAddr = msg.address & 0x0F; // Memory index at home
-                byte cacheIndex = msg.address % CACHE_SIZE; // Cache index (local)
+
+                byte procNodeAddr = msg.address >> 4;
+                byte memBlockAddr = msg.address & 0x0F;
+                byte cacheIndex = msg.address % CACHE_SIZE;
                 cacheLine *line = &node.cache[ cacheIndex ];
-                directoryEntry *dirEntry = NULL; // Directory entry pointer (null if not home node)
-                if (threadId == procNodeAddr) { // Access directory only if this is the home node
+                directoryEntry *dirEntry = NULL;
+                if (threadId == procNodeAddr) {
                    dirEntry = &node.directory[ memBlockAddr ];
                 }
 
-                // Process message based on type
+
                 switch ( msg.type ) {
-                     case READ_REQUEST: // Received at Home Node
+                     case READ_REQUEST:
                         assert(threadId == procNodeAddr);
                         assert(dirEntry != NULL);
                         msgReply.type = REPLY_RD;
@@ -194,136 +194,129 @@ int main( int argc, char * argv[] ) {
                         msgReply.secondReceiver = -1;
 
                         switch(dirEntry->state) {
-                            case U: // Unowned -> Exclusive (EM)
+                            case U:
                                 dirEntry->state = EM;
                                 dirEntry->bitVector = (1 << msg.sender);
                                 msgReply.value = node.memory[memBlockAddr];
-                                msgReply.bitVector = 2; // <<<--- Signal EXCLUSIVE with 2
+                                msgReply.bitVector = 2;
                                 sendMessage(msg.sender, msgReply);
                                 break;
-                            case S: // Shared -> Shared (add requestor)
+                            case S:
                                 dirEntry->bitVector |= (1 << msg.sender);
                                 msgReply.value = node.memory[memBlockAddr];
-                                msgReply.bitVector = 0; // <<<--- Signal SHARED with 0
+                                msgReply.bitVector = 0;
                                 sendMessage(msg.sender, msgReply);
                                 break;
-                            case EM: // Exclusive/Modified -> Shared (intervention needed)
+                            case EM:
                                 {
                                     int ownerId = findOwner(dirEntry->bitVector);
                                     assert(ownerId != -1);
 
                                     if (ownerId == msg.sender) {
-                                         // Read request from current owner - should be a hit locally for them.
                                          #ifdef DEBUG_MSG
                                          printf("Processor %d (Home) received READ_REQUEST for 0x%02X from current owner %d! Sending data, state remains EM.\n", threadId, msg.address, msg.sender);
                                          #endif
-                                         msgReply.value = node.memory[memBlockAddr]; // Data might be stale if M
-                                         msgReply.bitVector = 2; // Signal EXCLUSIVE
+                                         msgReply.value = node.memory[memBlockAddr];
+                                         msgReply.bitVector = 2;
                                          sendMessage(msg.sender, msgReply);
-                                    } else { // Normal intervention
+                                    } else {
                                         message forwardMsg;
                                         forwardMsg.type = WRITEBACK_INT;
                                         forwardMsg.sender = threadId;
                                         forwardMsg.address = msg.address;
-                                        forwardMsg.secondReceiver = msg.sender; // Original requestor
-                                        sendMessage(ownerId, forwardMsg); // Send to owner
+                                        forwardMsg.secondReceiver = msg.sender;
+                                        sendMessage(ownerId, forwardMsg);
 
-                                        dirEntry->state = S; // State becomes Shared
-                                        dirEntry->bitVector |= (1 << msg.sender); // Add requestor to vector
+                                        dirEntry->state = S;
+                                        dirEntry->bitVector |= (1 << msg.sender);
                                     }
                                 }
                                 break;
                         }
                         break;
 
-                    case REPLY_RD: // Received at Requesting Node
+                    case REPLY_RD:
+
                         if (line->address != 0xFF && line->address != msg.address && line->state != INVALID) {
-                           handleCacheReplacement(threadId, *line); // Evict old line if needed
+                           handleCacheReplacement(threadId, *line);
                         }
                         line->address = msg.address;
                         line->value = msg.value;
-                        // Set state based on signal from Home Node (2=Exclusive, 0=Shared)
-                        line->state = (msg.bitVector == 2) ? EXCLUSIVE : SHARED; // <<<--- Modified logic
-                        node.waitingForReply = 0; // Request satisfied
+                        line->state = (msg.bitVector == 2) ? EXCLUSIVE : SHARED;
+                        node.waitingForReply = 0;
                         break;
 
-                    case WRITEBACK_INT: // Received at Old Owner Node (Holding block in E or M)
-                        // Relaxed check: Verify we have the block in M or E state.
+                    case WRITEBACK_INT:
+
                         if (line->address == msg.address && (line->state == MODIFIED || line->state == EXCLUSIVE)) {
                             msgReply.type = FLUSH;
-                            msgReply.sender = threadId; // Owner sends flush
+                            msgReply.sender = threadId;
                             msgReply.address = msg.address;
-                            msgReply.value = line->value; // Flush current value
-                            msgReply.secondReceiver = msg.secondReceiver; // Original requestor ID
+                            msgReply.value = line->value;
+                            msgReply.secondReceiver = msg.secondReceiver;
 
-                            sendMessage(procNodeAddr, msgReply); // Send to home
+                            sendMessage(procNodeAddr, msgReply);
 
-                            if (msg.secondReceiver != procNodeAddr) { // Also send to requestor if different
+                            if (msg.secondReceiver != procNodeAddr) {
                                sendMessage(msg.secondReceiver, msgReply);
                             }
 
-                            line->state = SHARED; // Downgrade local state
+                            line->state = SHARED;
                         } else {
                              #ifdef DEBUG_MSG
                              printf("Processor %d received WRITEBACK_INT for 0x%02X but line state is %d (addr 0x%02X). Ignoring FLUSH.\n",
                                     threadId, msg.address, line->state, line->address);
                              #endif
-                             // Cannot fulfill - potentially stale request due to race
                         }
                         break;
 
-                    case FLUSH: // Received at Home Node OR at Requesting Node
-                        if (threadId == procNodeAddr) { // At Home Node
+                    case FLUSH:
+                        if (threadId == procNodeAddr) {
                             assert(dirEntry != NULL);
-                            node.memory[memBlockAddr] = msg.value; // Update memory
-                             // Check state consistency (optional, might fail in races)
+                            node.memory[memBlockAddr] = msg.value;
                              if (dirEntry->state != S) {
                                 #ifdef DEBUG_MSG
                                 printf("Processor %d (Home) received FLUSH for 0x%02X, expected state S but got %d. Vector=0x%02X. Updating mem only.\n",
                                        threadId, msg.address, dirEntry->state, dirEntry->bitVector);
                                 #endif
                              }
-                             // Ensure the participants are in the bitvector (might fail in races)
-                             // assert(isBitSet(dirEntry->bitVector, msg.sender)); // sender = old owner
-                             // assert(isBitSet(dirEntry->bitVector, msg.secondReceiver)); // rcv2 = requestor
+
+
                          }
-                        if (threadId == msg.secondReceiver) { // At Requesting Node
+                        if (threadId == msg.secondReceiver) {
+
                            if (line->address != 0xFF && line->address != msg.address && line->state != INVALID) {
                                handleCacheReplacement(threadId, *line);
                            }
                            line->address = msg.address;
                            line->value = msg.value;
-                           line->state = SHARED; // Become shared
-                           node.waitingForReply = 0; // Got data for read miss
+                           line->state = SHARED;
+                           node.waitingForReply = 0;
                         }
                         break;
 
-                    case UPGRADE: // Received at Home Node (Requesting write hit on S)
+                    case UPGRADE:
                         assert(threadId == procNodeAddr);
                         assert(dirEntry != NULL);
 
-                        // Relaxed check for state S
                         if (dirEntry->state == S) {
                             msgReply.type = REPLY_ID;
                             msgReply.sender = threadId;
                             msgReply.address = msg.address;
-                            msgReply.bitVector = dirEntry->bitVector & ~(1 << msg.sender); // Other sharers
+                            msgReply.bitVector = dirEntry->bitVector & ~(1 << msg.sender);
                             msgReply.secondReceiver = -1;
-                            sendMessage(msg.sender, msgReply); // Send list to requestor
+                            sendMessage(msg.sender, msgReply);
 
-                            dirEntry->state = EM; // Become exclusive owner
+                            dirEntry->state = EM;
                             dirEntry->bitVector = (1 << msg.sender);
                         } else {
                              #ifdef DEBUG_MSG
                              printf("Processor %d (Home) received UPGRADE for 0x%02X from %d, but state is %d (expected S). Vector: 0x%02X\n",
                                     threadId, msg.address, msg.sender, dirEntry->state, dirEntry->bitVector);
                              #endif
-                            // Handle unexpected states (e.g., if already EM or U due to race)
                             if (dirEntry->state == EM || dirEntry->state == U) {
-                                // Promote/confirm sender as EM owner
                                 dirEntry->state = EM;
                                 dirEntry->bitVector = (1 << msg.sender);
-                                // Send empty REPLY_ID as ack
                                  msgReply.type = REPLY_ID;
                                  msgReply.sender = threadId;
                                  msgReply.address = msg.address;
@@ -334,23 +327,31 @@ int main( int argc, char * argv[] ) {
                         }
                         break;
 
-                    case REPLY_ID: // Received at Requesting Node (who sent UPGRADE or WRITE_REQUEST(S))
-                        // If this was a write miss where home was S, update cache line now
+                    case REPLY_ID:
+
                         if (line->address == msg.address && line->state != MODIFIED) {
+
                              line->address = msg.address;
-                             line->value = node.pendingWriteValue; // Use stored value
+                             line->value = node.pendingWriteValue;
                              line->state = MODIFIED;
+                        } else if (line->address == msg.address && line->state == MODIFIED) {
+
                         } else {
-                            // If it was UPGRADE (hit on S), state should already be M
-                             assert(line->address == msg.address && line->state == MODIFIED);
+
+                            #ifdef DEBUG_MSG
+                            printf("Processor %d received REPLY_ID for 0x%02X but cache state is %d (addr 0x%02X). Ignoring INV.\n",
+                                   threadId, msg.address, line->state, line->address);
+                            #endif
+                            node.waitingForReply = 0;
+                            break;
                         }
 
-                        // Invalidate other sharers from the received list
+
                         for (int i = 0; i < NUM_PROCS; ++i) {
                             if (i != threadId && isBitSet(msg.bitVector, i)) {
                                 message invMsg;
                                 invMsg.type = INV;
-                                invMsg.sender = threadId; // New owner sends invalidate
+                                invMsg.sender = threadId;
                                 invMsg.address = msg.address;
                                 invMsg.secondReceiver = -1;
                                 sendMessage(i, invMsg);
@@ -359,11 +360,10 @@ int main( int argc, char * argv[] ) {
                                 #endif
                             }
                         }
-                        node.waitingForReply = 0; // Request is complete
+                        node.waitingForReply = 0;
                         break;
 
-                    case INV: // Received at a Sharer Node
-                        // Invalidate if currently Shared or Exclusive
+                    case INV:
                         if (line->address == msg.address && (line->state == SHARED || line->state == EXCLUSIVE)) {
                             line->state = INVALID;
                              #ifdef DEBUG_MSG
@@ -372,161 +372,165 @@ int main( int argc, char * argv[] ) {
                         }
                         break;
 
-                    case WRITE_REQUEST: // Received at Home Node
+                    case WRITE_REQUEST:
                         assert(threadId == procNodeAddr);
                         assert(dirEntry != NULL);
 
-                        node.memory[memBlockAddr] = msg.value; // Update memory immediately
+                        node.memory[memBlockAddr] = msg.value;
 
                         switch(dirEntry->state) {
-                            case U: // Unowned -> Modified (EM)
+                            case U:
                                 dirEntry->state = EM;
                                 dirEntry->bitVector = (1 << msg.sender);
 
-                                msgReply.type = REPLY_WR; // Ack write
+                                msgReply.type = REPLY_WR;
                                 msgReply.sender = threadId;
                                 msgReply.address = msg.address;
                                 msgReply.secondReceiver = -1;
                                 sendMessage(msg.sender, msgReply);
                                 break;
 
-                            case S: // Shared -> Modified (EM)
-                                msgReply.type = REPLY_ID; // Send sharer list
+                            case S:
+                                msgReply.type = REPLY_ID;
                                 msgReply.sender = threadId;
                                 msgReply.address = msg.address;
-                                msgReply.bitVector = dirEntry->bitVector & ~(1 << msg.sender); // Exclude requestor
+                                msgReply.bitVector = dirEntry->bitVector & ~(1 << msg.sender);
                                 msgReply.secondReceiver = -1;
                                 sendMessage(msg.sender, msgReply);
 
-                                dirEntry->state = EM; // Become exclusive owner
+                                dirEntry->state = EM;
                                 dirEntry->bitVector = (1 << msg.sender);
                                 break;
 
-                            case EM: // EM -> EM (Writeback-Invalidate needed)
+                            case EM:
                                 {
                                     int ownerId = findOwner(dirEntry->bitVector);
                                      assert(ownerId != -1);
 
-                                     if (ownerId == msg.sender) { // Write request from owner? Error state.
+                                     if (ownerId == msg.sender) {
                                           #ifdef DEBUG_MSG
                                           printf("Processor %d (Home) received WRITE_REQUEST for 0x%02X from current owner %d! Logic error?\n", threadId, msg.address, msg.sender);
                                           #endif
-                                         // Treat as U->EM? Just Ack.
                                          msgReply.type = REPLY_WR;
                                          msgReply.sender = threadId;
                                          msgReply.address = msg.address;
                                          msgReply.secondReceiver = -1;
                                          sendMessage(msg.sender, msgReply);
-                                         // State remains EM, owner msg.sender
-                                     } else { // Normal intervention
+
+                                     } else {
                                         message forwardMsg;
                                         forwardMsg.type = WRITEBACK_INV;
                                         forwardMsg.sender = threadId;
                                         forwardMsg.address = msg.address;
-                                        forwardMsg.secondReceiver = msg.sender; // New owner ID
-                                        sendMessage(ownerId, forwardMsg); // Send to old owner
+                                        forwardMsg.secondReceiver = msg.sender;
+                                        sendMessage(ownerId, forwardMsg);
 
-                                        // Update directory owner tentatively (will be confirmed by FLUSH_INVACK)
+
                                         dirEntry->bitVector = (1 << msg.sender);
-                                        // State remains EM
+
                                      }
                                 }
                                 break;
                         }
                         break;
 
-                    case REPLY_WR: // Received at Requesting Node (from Write Miss U -> EM)
-                         assert(line->address == msg.address || line->address == 0xFF);
+                    case REPLY_WR:
+
+                         if (line->address != 0xFF && line->address != msg.address && line->state != INVALID) {
+
+
+                         }
+                         assert(line->address == msg.address || line->address == 0xFF || line->state == INVALID);
 
                         line->address = msg.address;
-                        line->value = node.pendingWriteValue; // Use stored value
-                        line->state = MODIFIED; // Become owner
+                        line->value = node.pendingWriteValue;
+                        line->state = MODIFIED;
                         node.waitingForReply = 0;
                         break;
 
-                    case WRITEBACK_INV: // Received at Old Owner Node (holding E or M)
-                        // Relaxed check
+                    case WRITEBACK_INV:
+
                         if (line->address == msg.address && (line->state == MODIFIED || line->state == EXCLUSIVE)) {
                              msgReply.type = FLUSH_INVACK;
-                             msgReply.sender = threadId; // Old owner sends
+                             msgReply.sender = threadId;
                              msgReply.address = msg.address;
-                             msgReply.value = line->value; // Flush current value
-                             msgReply.secondReceiver = msg.secondReceiver; // New owner ID
+                             msgReply.value = line->value;
+                             msgReply.secondReceiver = msg.secondReceiver;
 
-                             sendMessage(procNodeAddr, msgReply); // Send to home
+                             sendMessage(procNodeAddr, msgReply);
 
-                             if (msg.secondReceiver != procNodeAddr) { // Also send to new owner if different
+                             if (msg.secondReceiver != procNodeAddr) {
                                 sendMessage(msg.secondReceiver, msgReply);
                              }
 
-                             line->state = INVALID; // Invalidate local line
+                             line->state = INVALID;
                         } else {
                              #ifdef DEBUG_MSG
                              printf("Processor %d received WRITEBACK_INV for 0x%02X but line state is %d (addr 0x%02X). Ignoring FLUSH.\n",
                                     threadId, msg.address, line->state, line->address);
                              #endif
-                             // Cannot fulfill potentially stale request
                         }
                         break;
 
-                    case FLUSH_INVACK: // Received at Home Node OR at New Owner Node
-                        if (threadId == procNodeAddr) { // At Home Node
+                    case FLUSH_INVACK:
+                        if (threadId == procNodeAddr) {
                              assert(dirEntry != NULL);
-                             node.memory[memBlockAddr] = msg.value; // Update memory
-                             dirEntry->state = EM; // Confirm EM state
-                             dirEntry->bitVector = (1 << msg.secondReceiver); // Confirm new owner
+                             node.memory[memBlockAddr] = msg.value;
+                             dirEntry->state = EM;
+                             dirEntry->bitVector = (1 << msg.secondReceiver);
                         }
 
-                        if (threadId == msg.secondReceiver) { // At New Owner Node (original requestor)
-                            assert(line->address == msg.address || line->address == 0xFF); // Should be target or empty
+                        if (threadId == msg.secondReceiver) {
+
+                           if (line->address != 0xFF && line->address != msg.address && line->state != INVALID) {
+
+
+                           }
+                            assert(line->address == msg.address || line->address == 0xFF || line->state == INVALID);
 
                             line->address = msg.address;
-                            line->value = msg.value; // Use flushed value (most recent)
-                            line->state = MODIFIED; // Become owner
-                            node.waitingForReply = 0; // Write request completed
+                            line->value = msg.value;
+                            line->state = MODIFIED;
+                            node.waitingForReply = 0;
                         }
                         break;
 
-                    case EVICT_SHARED: // Received at Home Node OR at last remaining sharer
-                        if (threadId == procNodeAddr) { // Received at Home node
+                    case EVICT_SHARED:
+                        if (threadId == procNodeAddr) {
                             assert(dirEntry != NULL);
-                            // Check if sender still holds the block (it might have been invalidated)
                             if (isBitSet(dirEntry->bitVector, msg.sender)) {
-                                dirEntry->bitVector &= ~(1 << msg.sender); // Remove sender
+                                dirEntry->bitVector &= ~(1 << msg.sender);
 
                                 int remainingSharers = countSharers(dirEntry->bitVector);
-                                if (remainingSharers == 0) { // No sharers left
+                                if (remainingSharers == 0) {
                                     dirEntry->state = U;
-                                } else if (remainingSharers == 1 && dirEntry->state == S) { // Only one left, was Shared
-                                    dirEntry->state = EM; // Promote to EM
+                                } else if (remainingSharers == 1 && dirEntry->state == S) {
+                                    dirEntry->state = EM;
                                     int newOwnerId = findOwner(dirEntry->bitVector);
                                     if (newOwnerId != -1) {
-                                        // Notify the remaining sharer to upgrade S -> E
                                         message upgradeNotifyMsg;
-                                        upgradeNotifyMsg.type = EVICT_SHARED; // Re-use type for notification
-                                        upgradeNotifyMsg.sender = threadId; // Home sends
+                                        upgradeNotifyMsg.type = EVICT_SHARED;
+                                        upgradeNotifyMsg.sender = threadId;
                                         upgradeNotifyMsg.address = msg.address;
                                         sendMessage(newOwnerId, upgradeNotifyMsg);
                                          #ifdef DEBUG_MSG
                                          printf("Processor %d (Home) telling %d to upgrade 0x%02X to E\n", threadId, newOwnerId, msg.address);
                                          #endif
                                     }
-                                } // Else (>1 sharer or was EM), state remains S or EM
+                                }
                             }
-                        } else { // Received at the potential new owner (last remaining sharer)
+                        } else {
                              #ifdef DEBUG_MSG
                              printf("Processor %d received upgrade request 0x%02X from Home %d\n", threadId, msg.address, msg.sender);
                              #endif
-                             // Verify sender is home node
                               if (msg.sender == procNodeAddr) {
-                                // If we still have the block as Shared, upgrade to Exclusive
                                 if (line->address == msg.address && line->state == SHARED) {
                                     line->state = EXCLUSIVE;
                                     #ifdef DEBUG_MSG
                                     printf("Processor %d upgraded 0x%02X from S to E\n", threadId, msg.address);
                                     #endif
                                 }
-                              } else { // Ignore if not from home node
+                              } else {
                                 #ifdef DEBUG_MSG
                                 printf("Processor %d received EVICT_SHARED upgrade request for 0x%02X from non-home node %d. Ignoring.\n", threadId, msg.address, msg.sender);
                                 #endif
@@ -534,12 +538,10 @@ int main( int argc, char * argv[] ) {
                         }
                         break;
 
-                    case EVICT_MODIFIED: // Received at Home Node
+                    case EVICT_MODIFIED:
                         assert(threadId == procNodeAddr);
                         assert(dirEntry != NULL);
-                        node.memory[memBlockAddr] = msg.value; // Update memory with flushed value
-
-                         // Check state consistency and clear owner
+                        node.memory[memBlockAddr] = msg.value;
                          if(dirEntry->state == EM && isBitSet(dirEntry->bitVector, msg.sender)){
                              dirEntry->bitVector = 0;
                              dirEntry->state = U;
@@ -547,7 +549,6 @@ int main( int argc, char * argv[] ) {
                              #ifdef DEBUG_MSG
                              printf("Processor %d (Home) received EVICT_MODIFIED for 0x%02X from %d, but state was %d/vector 0x%02X - Race condition?\n",
                                     threadId, msg.address, msg.sender, dirEntry->state, dirEntry->bitVector);
-                             // Attempt recovery if possible: If sender is the only one set, clear anyway.
                              if (countSharers(dirEntry->bitVector) == 1 && isBitSet(dirEntry->bitVector, msg.sender)) {
                                 dirEntry->bitVector = 0;
                                 dirEntry->state = U;
@@ -562,96 +563,87 @@ int main( int argc, char * argv[] ) {
                     default:
                         fprintf(stderr, "Processor %d: Unknown message type %d\n", threadId, msg.type);
                         break;
-                } // End switch(msg.type)
+                }
 
-                 omp_set_lock(&msgBufferLocks[threadId]); // Re-acquire lock to check buffer count
-            } // End while messages in buffer
+                 omp_set_lock(&msgBufferLocks[threadId]);
+            }
             omp_unset_lock(&msgBufferLocks[threadId]);
 
-            // Optional: Print state after processing messages if instructions are done
+
             if (instructions_done && processed_message_this_cycle) {
-                 // printProcessorState(threadId, node); // Uncomment if needed per requirements update
+
             }
 
-            // --- Step 2: Check if Waiting for Reply ---
+
             if (node.waitingForReply > 0) {
-                // usleep(10); // Optional yield to reduce busy-waiting
-                continue; // Skip instruction processing, go back to check messages
+
+                continue;
             }
 
-            // --- Step 3: Check if Instructions are Done ---
+
             if (instructions_done) {
-                 // Instructions finished, just process messages or idle
-                 if (!processed_message_this_cycle) usleep(100); // Yield if nothing happened
-                continue; // Loop back to check messages
+                 if (!processed_message_this_cycle) usleep(100);
+                continue;
             }
 
-            // --- Step 4: Process Next Instruction ---
+
             if (instructionIdx < node.instructionCount - 1) {
                 instructionIdx++;
                 instr = node.instructions[ instructionIdx ];
 
+
                  #ifdef DEBUG_INSTR
-                 printf("Processor %d: Executing instr %d: %c 0x%02X",
-                        threadId, instructionIdx, instr.type, instr.address);
-                 if (instr.type == 'W') {
-                     printf(" value %d", instr.value);
-                 }
-                 printf("\n");
+                 printf("Processor %d: instr type=%c, address=0x%02X, value=%d\n",
+                        threadId, instr.type, instr.address, instr.value );
                  #endif
 
+
+
                 byte procNodeAddr = instr.address >> 4;
-                //byte memBlockAddr = instr.address & 0x0F; // Not needed for local instruction logic
                 byte cacheIndex = instr.address % CACHE_SIZE;
                 cacheLine *line = &node.cache[ cacheIndex ];
 
-                // --- Process Read Instruction ---
+
                 if ( instr.type == 'R' ) {
-                    if (line->address == instr.address && line->state != INVALID) { // Cache Hit (M, E, or S)
+                    if (line->address == instr.address && line->state != INVALID) {
                         #ifdef DEBUG_INSTR
                         printf("Processor %d: Read Hit for 0x%02X, State: %d, Value: %d\n", threadId, instr.address, line->state, line->value);
                         #endif
-                        // No state change on read hit, value is available
-                    } else { // Cache Miss (or Invalid line hit)
+                    } else {
                         #ifdef DEBUG_INSTR
                         printf("Processor %d: Read Miss for 0x%02X\n", threadId, instr.address);
                         #endif
-                        // 1. Handle replacement if the current line is valid but for a different address
                         if (line->address != 0xFF && line->state != INVALID) {
                              handleCacheReplacement(threadId, *line);
                         }
-                        // 2. Send READ_REQUEST to home node
                         message requestMsg;
                         requestMsg.type = READ_REQUEST;
                         requestMsg.sender = threadId;
                         requestMsg.address = instr.address;
                         requestMsg.secondReceiver = -1;
                         sendMessage(procNodeAddr, requestMsg);
-                        // 3. Set waiting flag
                         node.waitingForReply = 1;
-                        // 4. Mark cache line as pending/invalid
                          line->state = INVALID;
-                         line->address = instr.address; // Keep track of target address
-                         line->value = 0; // Clear old value
+                         line->address = instr.address;
+                         line->value = 0;
                     }
                 }
-                // --- Process Write Instruction ---
-                else { // Write Instruction ('W')
-                    node.pendingWriteValue = instr.value; // Store value needed if miss/upgrade
 
-                    if (line->address == instr.address && line->state != INVALID) { // Write Hit
+                else {
+                    node.pendingWriteValue = instr.value;
+
+                    if (line->address == instr.address && line->state != INVALID) {
                          #ifdef DEBUG_INSTR
                          printf("Processor %d: Write Hit for 0x%02X, State: %d\n", threadId, instr.address, line->state);
                          #endif
                          switch(line->state) {
-                            case MODIFIED: // Hit on M
-                            case EXCLUSIVE: // Hit on E
-                                line->value = instr.value; // Write locally
-                                line->state = MODIFIED;    // State becomes/remains M
-                                // No network traffic, no waiting
-                                break;
+                            case MODIFIED:
+                            case EXCLUSIVE:
+                                line->value = instr.value;
+                                line->state = MODIFIED;
 
-                            case SHARED:    // Hit on S -> Upgrade
+                                break;
+                            case SHARED:
                                 #ifdef DEBUG_INSTR
                                 printf("Processor %d: Write Hit on SHARED 0x%02X -> Sending UPGRADE\n", threadId, instr.address);
                                 #endif
@@ -660,60 +652,54 @@ int main( int argc, char * argv[] ) {
                                 upgradeMsg.sender = threadId;
                                 upgradeMsg.address = instr.address;
                                 upgradeMsg.secondReceiver = -1;
-                                sendMessage(procNodeAddr, upgradeMsg); // Send UPGRADE to Home
-                                line->value = instr.value;             // Write locally
-                                line->state = MODIFIED;                // State becomes M
-                                node.waitingForReply = 1;              // Wait for REPLY_ID (invalidation list)
+                                sendMessage(procNodeAddr, upgradeMsg);
+                                line->value = instr.value;
+                                line->state = MODIFIED;
+                                node.waitingForReply = 1;
                                 break;
-
-                            default: // Should not happen (INVALID handled by outer 'else')
+                            default:
                                 #ifdef DEBUG_INSTR
                                 fprintf(stderr, "Processor %d: Write Hit in unexpected state %d for 0x%02X\n", threadId, line->state, line->address);
                                 #endif
                                 break;
                          }
-
-                    } else { // Write Miss (or Invalid line hit)
+                    } else {
                         #ifdef DEBUG_INSTR
                         printf("Processor %d: Write Miss for 0x%02X\n", threadId, instr.address);
                         #endif
-                        // 1. Handle replacement if the current line is valid but for a different address
                         if (line->address != 0xFF && line->state != INVALID) {
                              handleCacheReplacement(threadId, *line);
                         }
-                        // 2. Send WRITE_REQUEST to home node
                         message requestMsg;
                         requestMsg.type = WRITE_REQUEST;
                         requestMsg.sender = threadId;
                         requestMsg.address = instr.address;
-                        requestMsg.value = instr.value; // Include value for home node
+                        requestMsg.value = instr.value;
                         requestMsg.secondReceiver = -1;
                         sendMessage(procNodeAddr, requestMsg);
-                        // 3. Set waiting flag
                         node.waitingForReply = 1;
-                        // 4. Mark cache line as pending/invalid
                          line->state = INVALID;
-                         line->address = instr.address; // Keep track of target address
-                         line->value = 0; // Clear old value
-                    } // End Write Miss Block
-                } // End Write Instruction Block
+                         line->address = instr.address;
+                         line->value = 0;
+                    }
+                }
 
 
-            } else { // All instructions for this thread have been issued
+            } else {
                  if (!instructions_done) {
                      #ifdef DEBUG_INSTR
                      printf("Processor %d finished issuing instructions.\n", threadId);
                      #endif
                      instructions_done = 1;
-                     // Final mandatory print state call as per original requirements
+
                      printProcessorState(threadId, node);
                  }
-            } // End instruction processing block
+            }
 
-        } // End while(1) loop
-    } // End parallel region
+        }
+    }
 
-    // Clean up locks after parallel region
+
     for ( int i = 0; i < NUM_PROCS; i++ ) {
         omp_destroy_lock(&msgBufferLocks[i]);
     }
@@ -721,24 +707,23 @@ int main( int argc, char * argv[] ) {
     return EXIT_SUCCESS;
 }
 
-// Function to send a message safely
+
 void sendMessage( int receiver, message msg ) {
     omp_set_lock(&msgBufferLocks[receiver]);
 
-    // Check if the buffer is full (basic retry mechanism)
+
     if ( messageBuffers[receiver].count >= MSG_BUFFER_SIZE ) {
          fprintf(stderr, "WARNING: Processor %d: Message buffer for %d is full! Sender %d waiting.\n", omp_get_thread_num(), receiver, msg.sender);
-         omp_unset_lock(&msgBufferLocks[receiver]); // Release lock while waiting
+         omp_unset_lock(&msgBufferLocks[receiver]);
          while(1) {
-             usleep(1000); // Wait 1ms
+             usleep(1000);
              omp_set_lock(&msgBufferLocks[receiver]);
-             if (messageBuffers[receiver].count < MSG_BUFFER_SIZE) break; // Check again
+             if (messageBuffers[receiver].count < MSG_BUFFER_SIZE) break;
              omp_unset_lock(&msgBufferLocks[receiver]);
          }
-         // Re-acquired lock here
     }
 
-    // Add message to the queue
+
     int tail = messageBuffers[receiver].tail;
     messageBuffers[receiver].queue[tail] = msg;
     messageBuffers[receiver].tail = (tail + 1) % MSG_BUFFER_SIZE;
@@ -747,42 +732,42 @@ void sendMessage( int receiver, message msg ) {
     omp_unset_lock(&msgBufferLocks[receiver]);
 
     #ifdef DEBUG_MSG
-     printf("Processor %d sent msg to: %d, type: %d, address: 0x%02X, val: %d, vec: 0x%02X, rcv2: %d\n",
-             msg.sender, receiver, msg.type, msg.address, msg.value, msg.bitVector, msg.secondReceiver);
+
+     printf("Processor %d sent msg to: %d, type: %d, address: 0x%02X\n",
+             msg.sender, receiver, msg.type, msg.address);
     #endif
 }
 
-// Function to handle cache line replacement notification
+
 void handleCacheReplacement( int sender, cacheLine oldCacheLine ) {
-    // Only handle valid lines being replaced
+
     if (oldCacheLine.state == INVALID || oldCacheLine.address == 0xFF) {
         return;
     }
 
-    byte procNodeAddr = oldCacheLine.address >> 4; // Home node ID
+    byte procNodeAddr = oldCacheLine.address >> 4;
 
     #ifdef DEBUG_INSTR
     printf("Processor %d: Replacing cache line for address 0x%02X (State: %d)\n", sender, oldCacheLine.address, oldCacheLine.state);
     #endif
 
     message evictMsg;
-    evictMsg.sender = sender; // The node performing the eviction
+    evictMsg.sender = sender;
     evictMsg.address = oldCacheLine.address;
-    evictMsg.secondReceiver = -1; // Not used
+    evictMsg.secondReceiver = -1;
 
     switch ( oldCacheLine.state ) {
-        case EXCLUSIVE: // Treat Exclusive like Shared (clean eviction)
+        case EXCLUSIVE:
         case SHARED:
             evictMsg.type = EVICT_SHARED;
-            // No value needed
             sendMessage(procNodeAddr, evictMsg);
             break;
         case MODIFIED:
             evictMsg.type = EVICT_MODIFIED;
-            evictMsg.value = oldCacheLine.value; // Send dirty value
+            evictMsg.value = oldCacheLine.value;
             sendMessage(procNodeAddr, evictMsg);
             break;
-        case INVALID: // Should not happen due to initial check
+        case INVALID:
             break;
     }
 }
@@ -870,7 +855,7 @@ void printProcessorState(int processorId, processorNode node) {
     fprintf(file, "| Index | Address | State |    BitVector   |\n");
     fprintf(file, "|------------------------------------------|\n");
     for (int i = 0; i < MEM_SIZE; i++) {
-        fprintf(file, "|  %3d  |  0x%02X   |  %2s   |   0x%08B   |\n",
+        fprintf(file, "|  %3d  |  0x%02X   |  %2s   |   0x%08X   |\n",
                 i, (processorId << 4) + i, dirStateStr[node.directory[i].state],
                 node.directory[i].bitVector);
     }
