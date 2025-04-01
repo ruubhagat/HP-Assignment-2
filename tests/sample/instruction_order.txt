@@ -1,0 +1,4 @@
+Processor 0: instr type=W, address=0x15, value=100
+Processor 1: instr type=W, address=0x05, value=200
+Processor 0: instr type=R, address=0x17, value=0
+Processor 1: instr type=R, address=0x15, value=0
