@@ -1,5 +1,4 @@
-# Name : Rutuja Bhagat   
-# SRN : PES1UG23CS808
+# Name : Rutuja Bhagat         SRN : PES1UG23CS808
 ## HP-Assignment-2 Directory-Based Cache Coherence Protocol Simulation
 
 
